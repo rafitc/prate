@@ -1,10 +1,13 @@
 package node
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
+	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -16,6 +19,8 @@ type Listener struct {
 type Node struct {
 	Ip string
 }
+
+var port uint16 = 88
 
 func FetchAllNodes() error {
 	ip, mask, class, err := getLocalIP()
@@ -79,7 +84,7 @@ func generateIps(ip net.IP, mask string) {
 		log.Fatal("Something went wrong while calculating ip and netmask ")
 	}
 
-	// build all possible IP address
+	// build all possible IP address TODO only for first time, no need to redo till connection reset
 	var allIps []Node
 	for s1 := int(startIp[0]); s1 <= int(endIp[0]); s1++ {
 		for s2 := int(startIp[1]); s2 <= int(endIp[1]); s2++ {
@@ -93,8 +98,27 @@ func generateIps(ip net.IP, mask string) {
 
 	// spin a go routine for each ip range of 10, 192.168.1.0 - 192.168.1.10
 	// this goroutine pass into nmap to check is there any listeners in this ip range, if then update the list using go channels
-	// listeners := make(chan Listener)
+	listeners := make(chan Listener)
+	var blockOfNodes [][]string
+	var block []string
 
+	for index, eachIp := range allIps {
+		block = append(block, eachIp.Ip)
+
+		// Append block when it reaches 10 items
+		if (index+1)%10 == 0 {
+			blockOfNodes = append(blockOfNodes, append([]string(nil), block...))
+			block = block[:0] // Clear the block for the next set
+		}
+	}
+
+	// Append any remaining IPs in the final block if not empty
+	if len(block) > 0 {
+		blockOfNodes = append(blockOfNodes, append([]string(nil), block...))
+	}
+	for _, eachBlock := range blockOfNodes {
+		isNodeListening(eachBlock, port, listeners)
+	}
 }
 
 func hexToBinaryOfMask(hex string) int {
@@ -134,4 +158,34 @@ func calculateIPRange(ipStr string, bits int) (net.IP, net.IP, error) {
 	binary.BigEndian.PutUint32(endIP, endIPInt)
 
 	return startIP, endIP, nil
+}
+
+func isNodeListening(ips []string, port uint16, ch chan Listener) {
+	// ips, list of ip address so, one gocoroutine can check consecutive 10 ips together
+
+	// Construct command arguments
+	args := append([]string{"--open", fmt.Sprintf("-p%d", port), "-sS"}, ips...)
+	cmd := exec.Command("nmap", args...)
+
+	// Capture the command's output
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	// execute
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println("Error:", err)
+		fmt.Println("stderr:", stderr.String())
+		return
+	}
+	ipAddresses := extractIPAddresses(stdout.String())
+	fmt.Printf("%v \n", ipAddresses)
+}
+
+func extractIPAddresses(scanOutput string) []string {
+	ipPattern := `\b(?:\d{1,3}\.){3}\d{1,3}\b`
+	re := regexp.MustCompile(ipPattern)
+	matches := re.FindAllString(scanOutput, -1)
+
+	return matches
 }
